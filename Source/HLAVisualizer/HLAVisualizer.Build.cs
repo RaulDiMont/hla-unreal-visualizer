@@ -9,9 +9,13 @@ public class HLAVisualizer : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput" });
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "CesiumRuntime" });
 
 		PrivateDependencyModuleNames.AddRange(new string[] {  });
+
+		// Allow subdirectory includes (e.g. "Types/FAircraftState.h", "UnrealFederate/FHLAAmbassador.h")
+		// to resolve relative to the module root. UBT does not add this automatically.
+		PrivateIncludePaths.Add(ModuleDirectory);
 
 		// Uncomment if you are using Slate UI
 		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });

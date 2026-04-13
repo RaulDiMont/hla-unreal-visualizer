@@ -61,3 +61,6 @@ ehthumbs.db
 *.orig
 *.tmp
 *_BackUpThisFolder_*
+/cesium-request-cache.sqlite
+/cesium-request-cache.sqlite-shm
+/cesium-request-cache.sqlite-wal

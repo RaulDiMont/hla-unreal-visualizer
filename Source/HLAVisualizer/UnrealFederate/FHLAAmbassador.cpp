@@ -1,6 +1,8 @@
 #include "FHLAAmbassador.h"
 
-#include <cstring>  // std::memcpy
+THIRD_PARTY_INCLUDES_START
+#include <RTI/encoding/BasicDataElements.h>
+THIRD_PARTY_INCLUDES_END
 
 FHLAAmbassador::FHLAAmbassador(
     TQueue<FAircraftState, EQueueMode::Spsc>* InAircraftQueue,
@@ -54,33 +56,49 @@ void FHLAAmbassador::reflectAttributeValues(
 
     const rti1516e::ObjectClassHandle& ObjectClass = It->second;
 
-    // Helper: copy raw bytes from a VariableLengthData entry into a typed value.
-    // Both sides are x64 little-endian (WSL2 Linux + Windows), so no byte-swap is needed.
-    auto ReadBytes = [&](rti1516e::AttributeHandle Handle, void* OutValue, size_t ExpectedSize) -> bool
+    // Decode a HLAfloat64BE attribute into a double.
+    // The simulator (WSL2) encodes all floating-point attributes as big-endian (HLAfloat64BE),
+    // which is the IEEE 1516-2010 standard network encoding.
+    auto DecodeFloat64 = [&](rti1516e::AttributeHandle Handle, double& Out) -> bool
     {
-        auto AttrIt = theAttributeValues.find(Handle);
-        if (AttrIt != theAttributeValues.end() && AttrIt->second.size() == ExpectedSize)
-        {
-            std::memcpy(OutValue, AttrIt->second.data(), ExpectedSize);
-            return true;
-        }
-        return false;
+        auto It = theAttributeValues.find(Handle);
+        if (It == theAttributeValues.end()) return false;
+        rti1516e::HLAfloat64BE decoder;
+        decoder.decode(It->second);
+        Out = decoder.get();
+        return true;
+    };
+
+    // Decode a HLAfloat32BE attribute into a float.
+    auto DecodeFloat32 = [&](rti1516e::AttributeHandle Handle, float& Out) -> bool
+    {
+        auto It = theAttributeValues.find(Handle);
+        if (It == theAttributeValues.end()) return false;
+        rti1516e::HLAfloat32BE decoder;
+        decoder.decode(It->second);
+        Out = decoder.get();
+        return true;
     };
 
     if (ObjectClass == AircraftClass)
     {
         FAircraftState State;
-        ReadBytes(LatitudeHandle,  &State.Latitude,  sizeof(double));
-        ReadBytes(LongitudeHandle, &State.Longitude, sizeof(double));
-        ReadBytes(AltitudeHandle,  &State.Altitude,  sizeof(double));
+        DecodeFloat64(LatitudeHandle,  State.Latitude);
+        DecodeFloat64(LongitudeHandle, State.Longitude);
+        DecodeFloat64(AltitudeHandle,  State.Altitude);
         AircraftQueue->Enqueue(State);
     }
     else if (ObjectClass == RadarContactClass)
     {
         FRadarContact Contact;
-        ReadBytes(DistanceHandle,  &Contact.Distance,  sizeof(float));
-        ReadBytes(BearingHandle,   &Contact.Bearing,   sizeof(float));
-        ReadBytes(IsInRangeHandle, &Contact.IsInRange, sizeof(bool));
+        DecodeFloat32(DistanceHandle, Contact.Distance);
+        DecodeFloat32(BearingHandle,  Contact.Bearing);
+        // IsInRange — check RadarFederate encoding; assume HLAboolean (1 byte) for now.
+        auto InRangeIt = theAttributeValues.find(IsInRangeHandle);
+        if (InRangeIt != theAttributeValues.end() && InRangeIt->second.size() == 1)
+        {
+            Contact.IsInRange = (*static_cast<const uint8_t*>(InRangeIt->second.data()) != 0);
+        }
         RadarQueue->Enqueue(Contact);
     }
 }

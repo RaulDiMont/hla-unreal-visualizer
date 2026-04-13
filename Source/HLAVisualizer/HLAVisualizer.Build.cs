@@ -9,7 +9,7 @@ public class HLAVisualizer : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "CesiumRuntime" });
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "CesiumRuntime", "DeveloperSettings" });
 
 		PrivateDependencyModuleNames.AddRange(new string[] {  });
 

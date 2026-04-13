@@ -1,4 +1,5 @@
 #include "FHLAAmbassador.h"
+#include "FHLAFederateRunnable.h"
 
 THIRD_PARTY_INCLUDES_START
 #include <RTI/encoding/BasicDataElements.h>
@@ -6,9 +7,11 @@ THIRD_PARTY_INCLUDES_END
 
 FHLAAmbassador::FHLAAmbassador(
     TQueue<FAircraftState, EQueueMode::Spsc>* InAircraftQueue,
-    TQueue<FRadarContact,  EQueueMode::Spsc>* InRadarQueue)
+    TQueue<FRadarContact,  EQueueMode::Spsc>* InRadarQueue,
+    FHLAFederateRunnable*                     InOwner)
     : AircraftQueue(InAircraftQueue)
     , RadarQueue(InRadarQueue)
+    , Owner(InOwner)
 {
 }
 
@@ -28,6 +31,18 @@ void FHLAAmbassador::CacheHandles(rti1516e::RTIambassador& Rta)
     DistanceHandle  = Rta.getAttributeHandle(RadarContactClass, L"Distance");
     BearingHandle   = Rta.getAttributeHandle(RadarContactClass, L"Bearing");
     IsInRangeHandle = Rta.getAttributeHandle(RadarContactClass, L"IsInRange");
+}
+
+void FHLAAmbassador::connectionLost(std::wstring const& faultDescription)
+    RTI_THROW((rti1516e::FederateInternalError))
+{
+    // Called by OpenRTI from within evokeCallback when the rtinode connection drops.
+    // We are already on the HLA thread — safe to write to the atomic flags directly.
+    // Do NOT call resignFederationExecution here: the RTI is already tearing down and
+    // a resign call would cause an access violation inside OpenRTI.
+    UE_LOG(LogTemp, Warning, TEXT("UnrealFederate: connectionLost — %s"),
+           *FString(faultDescription.c_str()));
+    Owner->SignalConnectionLost();
 }
 
 void FHLAAmbassador::discoverObjectInstance(

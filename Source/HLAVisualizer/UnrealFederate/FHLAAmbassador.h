@@ -20,18 +20,27 @@ THIRD_PARTY_INCLUDES_END
 //
 // Threading: callbacks arrive on the FHLAFederateRunnable thread (the same thread
 // that calls evokeCallback). This class itself has no thread state.
+class FHLAFederateRunnable;
+
 class FHLAAmbassador : public rti1516e::NullFederateAmbassador
 {
 public:
     FHLAAmbassador(
         TQueue<FAircraftState, EQueueMode::Spsc>* InAircraftQueue,
-        TQueue<FRadarContact,  EQueueMode::Spsc>* InRadarQueue);
+        TQueue<FRadarContact,  EQueueMode::Spsc>* InRadarQueue,
+        FHLAFederateRunnable*                     InOwner);
 
     virtual ~FHLAAmbassador() RTI_NOEXCEPT override;
 
     // Called by FHLAFederateRunnable after joining the federation.
     // Fetches and caches all object class and attribute handles needed for decoding.
     void CacheHandles(rti1516e::RTIambassador& Rta);
+
+    // 4.8 — called by the RTI when the connection to rtinode is lost unexpectedly
+    // (e.g. WSL2 simulation exits before Unreal stops Play).
+    // Signals the FHLAFederateRunnable pump to exit cleanly before OpenRTI tears down.
+    virtual void connectionLost(std::wstring const& faultDescription)
+        RTI_THROW((rti1516e::FederateInternalError)) override;
 
     // 6.9 — records newly discovered object instances so reflectAttributeValues can
     // dispatch to the correct struct (Aircraft vs RadarContact).
@@ -54,6 +63,7 @@ public:
 private:
     TQueue<FAircraftState, EQueueMode::Spsc>* AircraftQueue;
     TQueue<FRadarContact,  EQueueMode::Spsc>* RadarQueue;
+    FHLAFederateRunnable*                     Owner;
 
     // Cached object class handles
     rti1516e::ObjectClassHandle AircraftClass;

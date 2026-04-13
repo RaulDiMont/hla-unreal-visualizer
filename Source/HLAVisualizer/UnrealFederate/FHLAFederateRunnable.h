@@ -29,14 +29,20 @@ class FHLAFederateRunnable : public FRunnable
 public:
     FHLAFederateRunnable(
         TQueue<FAircraftState, EQueueMode::Spsc>* InAircraftQueue,
-        TQueue<FRadarContact,  EQueueMode::Spsc>* InRadarQueue);
+        TQueue<FRadarContact,  EQueueMode::Spsc>* InRadarQueue,
+        FString                                   InRtiAddress,
+        FString                                   InFederationName);
 
     virtual ~FHLAFederateRunnable() override;
 
     // FRunnable interface
-    virtual bool   Init() override;  // Connect + join + subscribe; returns false on failure
-    virtual uint32 Run()  override;  // evokeCallback loop
+    virtual bool   Init() override;  // Sets bRunning = true; connection work is done in Run()
+    virtual uint32 Run()  override;  // Connect + join + subscribe, then evokeCallback loop
     virtual void   Stop() override;  // Signal exit (resign/disconnect deferred to post-MVP)
+
+    // Called by FHLAAmbassador::connectionLost() from within evokeCallback.
+    // Marks the pump as stopped so Run() exits cleanly before OpenRTI tears down.
+    void SignalConnectionLost();
 
 private:
     TQueue<FAircraftState, EQueueMode::Spsc>* AircraftQueue;
@@ -47,4 +53,7 @@ private:
 
     std::atomic<bool> bRunning   { false };
     std::atomic<bool> bConnected { false };  // false once evokeCallback signals connection loss
+
+    std::wstring RtiUrl;
+    std::wstring FederationNameW;
 };

@@ -3,6 +3,7 @@
 #include "HAL/RunnableThread.h"
 #include "CesiumGlobeAnchorComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Settings/UHLASettings.h"
 
 AUnrealFederateActor::AUnrealFederateActor()
 {
@@ -18,7 +19,13 @@ void AUnrealFederateActor::BeginPlay()
 {
     Super::BeginPlay();
 
-    HLARunnable = new FHLAFederateRunnable(&AircraftStateQueue, &RadarContactQueue);
+    const UHLASettings* Settings = GetDefault<UHLASettings>();
+    UE_LOG(LogTemp, Log, TEXT("UnrealFederate: RTI address = '%s', federation = '%s'"),
+           *Settings->RTIAddress, *Settings->FederationName);
+
+    HLARunnable = new FHLAFederateRunnable(
+        &AircraftStateQueue, &RadarContactQueue,
+        Settings->RTIAddress, Settings->FederationName);
     HLAThread   = FRunnableThread::Create(HLARunnable, TEXT("HLAFederateThread"),
                                           0, TPri_Normal);
 

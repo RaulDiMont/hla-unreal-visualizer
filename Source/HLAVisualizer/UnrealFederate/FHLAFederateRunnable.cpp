@@ -6,20 +6,17 @@ THIRD_PARTY_INCLUDES_START
 #include <RTI/Enums.h>
 THIRD_PARTY_INCLUDES_END
 
-// RTI connection settings.
-//
-// WSL2_IP: the virtual network IP of the WSL2 instance.
-// Run `ip addr show eth0 | grep "inet "` inside WSL2 to get it — it changes on reboot.
-// rtinode must already be running: `rtinode -i 0.0.0.0:14321`
-static const std::wstring kRtiUrl         = L"rti://172.26.53.127:14321";
-static const std::wstring kFederationName = L"AircraftSimulation";
-static const std::wstring kFederateType   = L"UnrealFederate";
+static const std::wstring kFederateType = L"UnrealFederate";
 
 FHLAFederateRunnable::FHLAFederateRunnable(
     TQueue<FAircraftState, EQueueMode::Spsc>* InAircraftQueue,
-    TQueue<FRadarContact,  EQueueMode::Spsc>* InRadarQueue)
+    TQueue<FRadarContact,  EQueueMode::Spsc>* InRadarQueue,
+    FString                                   InRtiAddress,
+    FString                                   InFederationName)
     : AircraftQueue(InAircraftQueue)
     , RadarQueue(InRadarQueue)
+    , RtiUrl(*InRtiAddress)
+    , FederationNameW(*InFederationName)
 {
 }
 
@@ -33,17 +30,20 @@ static bool TryConnect(
     TUniquePtr<FHLAAmbassador>&               OutAmbassador,
     std::unique_ptr<rti1516e::RTIambassador>& OutRti,
     TQueue<FAircraftState, EQueueMode::Spsc>* AircraftQueue,
-    TQueue<FRadarContact,  EQueueMode::Spsc>* RadarQueue)
+    TQueue<FRadarContact,  EQueueMode::Spsc>* RadarQueue,
+    FHLAFederateRunnable*                     Owner,
+    const std::wstring&                       InRtiUrl,
+    const std::wstring&                       InFederationName)
 {
     try
     {
-        OutAmbassador = MakeUnique<FHLAAmbassador>(AircraftQueue, RadarQueue);
+        OutAmbassador = MakeUnique<FHLAAmbassador>(AircraftQueue, RadarQueue, Owner);
 
         rti1516e::RTIambassadorFactory Factory;
         OutRti = Factory.createRTIambassador();
 
-        OutRti->connect(*OutAmbassador, rti1516e::HLA_EVOKED, kRtiUrl);
-        OutRti->joinFederationExecution(kFederateType, kFederationName);
+        OutRti->connect(*OutAmbassador, rti1516e::HLA_EVOKED, InRtiUrl);
+        OutRti->joinFederationExecution(kFederateType, InFederationName);
 
         OutAmbassador->CacheHandles(*OutRti);
 
@@ -82,12 +82,20 @@ static bool TryConnect(
 
 bool FHLAFederateRunnable::Init()
 {
-    // Retry loop: wait for the federation to be created by the WSL2 simulator.
-    // This allows pressing Play in Unreal before launching aircraft_simulator.
+    // Init() is called by FRunnableThread::Create() while the GameThread is blocked
+    // waiting for this semaphore. Keep it instant — all connection work goes in Run().
+    bRunning.store(true);
+    return true;
+}
+
+uint32 FHLAFederateRunnable::Run()
+{
+    // Connect + join before entering the event pump.
+    // Running on the HLA thread — the GameThread is never blocked here.
     constexpr int   MaxRetries     = 30;
     constexpr float RetryIntervalS = 2.0f;
 
-    for (int i = 0; i < MaxRetries; ++i)
+    for (int i = 0; i < MaxRetries && bRunning.load(); ++i)
     {
         if (i > 0)
         {
@@ -95,22 +103,23 @@ bool FHLAFederateRunnable::Init()
             FPlatformProcess::Sleep(RetryIntervalS);
         }
 
-        if (TryConnect(Ambassador, RtiAmbassador, AircraftQueue, RadarQueue))
+        if (TryConnect(Ambassador, RtiAmbassador, AircraftQueue, RadarQueue, this, RtiUrl, FederationNameW))
         {
-            bRunning.store(true);
             bConnected.store(true);
             UE_LOG(LogTemp, Log, TEXT("UnrealFederate: joined '%s' at %s"),
-                   *FString(kFederationName.c_str()), *FString(kRtiUrl.c_str()));
-            return true;
+                   *FString(FederationNameW.c_str()), *FString(RtiUrl.c_str()));
+            break;
         }
     }
 
-    UE_LOG(LogTemp, Error, TEXT("UnrealFederate: could not join federation after %d retries. Check rtinode and aircraft_simulator are running."), MaxRetries);
-    return false;
-}
+    if (!bConnected.load())
+    {
+        UE_LOG(LogTemp, Error, TEXT("UnrealFederate: could not join federation after %d retries. Check rtinode and aircraft_simulator are running."), MaxRetries);
+        bRunning.store(false);
+        return 1;
+    }
 
-uint32 FHLAFederateRunnable::Run()
-{
+    // Event pump: drain HLA callbacks until Stop() is called or the federation ends.
     while (bRunning.load())
     {
         try
@@ -131,6 +140,16 @@ uint32 FHLAFederateRunnable::Run()
     return 0;
 }
 
+void FHLAFederateRunnable::SignalConnectionLost()
+{
+    // Called from FHLAAmbassador::connectionLost(), which fires inside evokeCallback.
+    // Setting bRunning to false here causes the while(bRunning) loop in Run() to exit
+    // after evokeCallback returns — OpenRTI still owns the ambassador at this point,
+    // so we must not touch RtiAmbassador after this call.
+    bConnected.store(false);
+    bRunning.store(false);
+}
+
 void FHLAFederateRunnable::Stop()
 {
     bRunning.store(false);
@@ -142,9 +161,7 @@ void FHLAFederateRunnable::Stop()
     // the destroyed federation. Calling resignFederationExecution() on that state
     // causes an access violation inside OpenRTI itself (not catchable via C++ try/catch).
     //
-    // For the MVP we rely on the RTIambassador destructor and OS socket teardown to
-    // clean up the connection. A proper reconnect/lifecycle policy is deferred to post-MVP.
-    //
-    // TODO (post-MVP): implement FederateAmbassador::connectionLost() in FHLAAmbassador
-    // to detect federation teardown and allow a clean resign before the simulation ends.
+    // The clean shutdown path when the simulation ends first is handled by
+    // FHLAAmbassador::connectionLost() → SignalConnectionLost(), which exits the Run()
+    // loop before OpenRTI tears down its internal state.
 }

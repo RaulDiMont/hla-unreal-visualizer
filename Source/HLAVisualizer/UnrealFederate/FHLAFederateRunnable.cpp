@@ -11,7 +11,7 @@ THIRD_PARTY_INCLUDES_END
 // WSL2_IP: the virtual network IP of the WSL2 instance.
 // Run `ip addr show eth0 | grep "inet "` inside WSL2 to get it — it changes on reboot.
 // rtinode must already be running: `rtinode --listen 0.0.0.0:14321 &`
-static const std::wstring kRtiUrl         = L"rti://172.24.176.1:14321";
+static const std::wstring kRtiUrl         = L"rti://172.26.53.127:14321";
 static const std::wstring kFederationName = L"AircraftSimulation";
 static const std::wstring kFederateType   = L"UnrealFederate";
 

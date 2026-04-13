@@ -1,0 +1,10 @@
+^C:\REPOS\HLA_VISUALIZER\HLAVISUALIZER\TOOLS\HLACONNECTIVITYTEST\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -SC:/Repos/hla_visualizer/HLAVisualizer/Tools/HLAConnectivityTest -BC:/Repos/hla_visualizer/HLAVisualizer/Tools/HLAConnectivityTest/build --check-stamp-file C:/Repos/hla_visualizer/HLAVisualizer/Tools/HLAConnectivityTest/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

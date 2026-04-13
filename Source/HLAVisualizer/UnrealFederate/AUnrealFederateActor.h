@@ -51,6 +51,6 @@ private:
     FRunnableThread*      HLAThread   = nullptr;
 
     // Tracks the latest radar state between frames.
-    // Used in Phase 4.5 for A320 material switching (IsInRange highlight).
+    // Used in Phase 5 for A320 material switching (IsInRange highlight).
     bool bIsInRange = false;
 };

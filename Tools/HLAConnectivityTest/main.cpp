@@ -1,6 +1,6 @@
 // HLAConnectivityTest/main.cpp
 //
-// Phase 4.1 verification app — joins the AircraftSimulation HLA federation
+// Phase 1 verification app — joins the AircraftSimulation HLA federation
 // running on rtinode in WSL2, then immediately resigns.
 //
 // Purpose: confirm that a Windows process can reach the WSL2 rtinode via tcp://
@@ -65,7 +65,7 @@ int main(int argc, char* argv[])
         RtiAmb->disconnect();
         std::wcout << L"[OK] Disconnected from rtinode\n";
 
-        std::wcout << L"\nSUCCESS — Phase 4.1 connectivity verified.\n"
+        std::wcout << L"\nSUCCESS — Phase 1 connectivity verified.\n"
                    << L"Windows process successfully joined HLA federation over WSL2 tcp://\n";
         return 0;
     }

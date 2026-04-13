@@ -61,7 +61,7 @@ void AUnrealFederateActor::Tick(float DeltaTime)
     {
         bIsInRange = Contact.IsInRange;
     }
-    // Phase 4.5: material switching on bIsInRange goes here.
+    // Phase 5: material switching on bIsInRange goes here.
 }
 
 void AUnrealFederateActor::EndPlay(const EEndPlayReason::Type EndPlayReason)

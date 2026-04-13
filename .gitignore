@@ -20,6 +20,8 @@
 ThirdParty/*/Binaries/
 ThirdParty/*/lib/
 ThirdParty/*/bin/
+# But keep the placeholder files that track the directories in git
+!ThirdParty/**/.gitkeep
 
 # Cesium for Unreal and other Marketplace plugins
 # These are installed locally from the Epic Launcher and are not part of the repo

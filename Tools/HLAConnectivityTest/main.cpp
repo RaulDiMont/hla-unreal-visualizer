@@ -9,15 +9,18 @@
 // Usage:
 //   HLAConnectivityTest.exe [rtinode_address]
 //
-// Default address: tcp://172.28.0.1:14321
+// Default address: rti://172.26.57.207:14321
 // To find the actual WSL2 IP in WSL2: ip addr show eth0 | grep inet
 //
+// NOTE: OpenRTI 0.10.0 uses "rti://" for TCP connections, NOT "tcp://".
+//       "tcp://" is silently unrecognized and causes ConnectionFailed.
+//
 // Prerequisites:
-//   - rtinode running in WSL2:  rtinode --listen 0.0.0.0:14321
+//   - rtinode running in WSL2:  rtinode -i 0.0.0.0:14321  (from ~/hla_simulator/build)
 //   - aircraft_simulator running in WSL2 (creates the federation)
-//   - OpenRTI.dll next to this exe (CMake post-build step handles this)
+//   - librti1516e.dll + OpenRTI.dll next to this exe (CMake post-build step handles this)
 
-#include <RTI/RTI1516e.h>
+#include <RTI/RTI1516.h>
 #include <RTI/NullFederateAmbassador.h>
 #include <iostream>
 #include <memory>
@@ -31,12 +34,12 @@ int main(int argc, char* argv[])
     const std::wstring FederateType   = L"Verifier";
 
     // Accept rtinode address as optional CLI argument
-    std::string RtiAddress = "tcp://172.28.0.1:14321";
+    // OpenRTI 0.10.0 uses "rti://" for TCP — NOT "tcp://"
+    std::wstring RtiAddress = L"rti://172.26.57.207:14321";
     if (argc > 1)
-        RtiAddress = argv[1];
+        RtiAddress = std::wstring(argv[1], argv[1] + strlen(argv[1]));
 
-    std::wcout << L"[HLAConnectivityTest] Connecting to: "
-               << std::wstring(RtiAddress.begin(), RtiAddress.end()) << L"\n";
+    std::wcout << L"[HLAConnectivityTest] Connecting to: " << RtiAddress << L"\n";
 
     try
     {
@@ -68,11 +71,11 @@ int main(int argc, char* argv[])
     }
     catch (const rti1516e::ConnectionFailed& e)
     {
-        std::wcerr << L"[FAIL] Cannot reach rtinode at "
-                   << std::wstring(RtiAddress.begin(), RtiAddress.end()) << L"\n"
+        std::wcerr << L"[FAIL] Cannot reach rtinode at " << RtiAddress << L"\n"
                    << L"       " << e.what() << L"\n"
-                   << L"  --> Is rtinode running in WSL2?  rtinode --listen 0.0.0.0:14321\n"
-                   << L"  --> Is port 14321 open in Windows Firewall?\n";
+                   << L"  --> Is rtinode running in WSL2?  rtinode -i 0.0.0.0:14321\n"
+                   << L"  --> Is port 14321 open in Windows Firewall?\n"
+                   << L"  --> Use rti:// not tcp:// (OpenRTI 0.10.0 does not recognize tcp://)\n";
         return 1;
     }
     catch (const rti1516e::FederationExecutionDoesNotExist& e)

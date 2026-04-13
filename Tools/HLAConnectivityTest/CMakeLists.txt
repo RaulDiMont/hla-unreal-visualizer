@@ -16,17 +16,23 @@ endif()
 add_executable(HLAConnectivityTest main.cpp)
 
 target_include_directories(HLAConnectivityTest PRIVATE
-    "${OPENRTI_DIR}/include"
+    "${OPENRTI_DIR}/include/rti1516e"
 )
 
 target_link_libraries(HLAConnectivityTest PRIVATE
-    "${OPENRTI_DIR}/lib/OpenRTI.lib"
+    "${OPENRTI_DIR}/lib/rti1516e.lib"
 )
 
-# Copy OpenRTI.dll next to the exe so it can be found at runtime
+# Copy DLLs next to the exe — librti1516e.dll depends on OpenRTI.dll
 add_custom_command(TARGET HLAConnectivityTest POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${OPENRTI_DIR}/bin/librti1516e.dll"
+        "$<TARGET_FILE_DIR:HLAConnectivityTest>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${OPENRTI_DIR}/bin/libfedtime1516e.dll"
+        "$<TARGET_FILE_DIR:HLAConnectivityTest>"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${OPENRTI_DIR}/bin/OpenRTI.dll"
         "$<TARGET_FILE_DIR:HLAConnectivityTest>"
-    COMMENT "Copying OpenRTI.dll to output directory"
+    COMMENT "Copying OpenRTI DLLs to output directory"
 )

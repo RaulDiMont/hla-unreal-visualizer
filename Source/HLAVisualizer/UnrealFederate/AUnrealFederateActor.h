@@ -58,7 +58,14 @@ public:
     UPROPERTY(EditAnywhere, Category = "HLA|Materials")
     TObjectPtr<UMaterialInterface> M_InRange;
 
+    // How far behind real time the visualizer renders (seconds).
+    // Must be >= 2x the HLA update interval (1 Hz → min 2.0 s) to guarantee 3 buffered states.
+    UPROPERTY(EditAnywhere, Category = "HLA|Interpolation", meta = (ClampMin = "0.5"))
+    float InterpolationDelaySeconds = 2.0f;
+
 private:
+    // Circular buffer of the last 3 received states — used for Lagrange quadratic interpolation.
+    TArray<FAircraftState> PositionBuffer;
     // SPSC queues: HLA thread produces, GameThread (Tick) consumes.
     TQueue<FAircraftState, EQueueMode::Spsc> AircraftStateQueue;
     TQueue<FRadarContact,  EQueueMode::Spsc> RadarContactQueue;

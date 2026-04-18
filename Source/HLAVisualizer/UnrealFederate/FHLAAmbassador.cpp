@@ -1,5 +1,6 @@
 #include "FHLAAmbassador.h"
 #include "FHLAFederateRunnable.h"
+#include "HAL/PlatformTime.h"
 
 THIRD_PARTY_INCLUDES_START
 #include <RTI/encoding/BasicDataElements.h>
@@ -101,6 +102,7 @@ void FHLAAmbassador::reflectAttributeValues(
         DecodeFloat64(LatitudeHandle,  State.Latitude);
         DecodeFloat64(LongitudeHandle, State.Longitude);
         DecodeFloat64(AltitudeHandle,  State.Altitude);
+        State.Timestamp = FPlatformTime::Seconds();
         UE_LOG(LogTemp, Log, TEXT("[Aircraft] Lat=%.6f  Lon=%.6f  Alt=%.1f ft"),
             State.Latitude, State.Longitude, State.Altitude);
         AircraftQueue->Enqueue(State);

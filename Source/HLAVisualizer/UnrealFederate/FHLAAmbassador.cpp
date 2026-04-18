@@ -101,19 +101,25 @@ void FHLAAmbassador::reflectAttributeValues(
         DecodeFloat64(LatitudeHandle,  State.Latitude);
         DecodeFloat64(LongitudeHandle, State.Longitude);
         DecodeFloat64(AltitudeHandle,  State.Altitude);
+        UE_LOG(LogTemp, Log, TEXT("[Aircraft] Lat=%.6f  Lon=%.6f  Alt=%.1f ft"),
+            State.Latitude, State.Longitude, State.Altitude);
         AircraftQueue->Enqueue(State);
     }
     else if (ObjectClass == RadarContactClass)
     {
         FRadarContact Contact;
-        DecodeFloat32(DistanceHandle, Contact.Distance);
-        DecodeFloat32(BearingHandle,  Contact.Bearing);
-        // IsInRange — check RadarFederate encoding; assume HLAboolean (1 byte) for now.
+        DecodeFloat64(DistanceHandle, Contact.Distance);
+        DecodeFloat64(BearingHandle,  Contact.Bearing);
+        // IsInRange — HLAboolean (4 bytes). OpenRTI wraps it as bool via get().
         auto InRangeIt = theAttributeValues.find(IsInRangeHandle);
-        if (InRangeIt != theAttributeValues.end() && InRangeIt->second.size() == 1)
+        if (InRangeIt != theAttributeValues.end())
         {
-            Contact.IsInRange = (*static_cast<const uint8_t*>(InRangeIt->second.data()) != 0);
+            rti1516e::HLAboolean Decoder;
+            Decoder.decode(InRangeIt->second);
+            Contact.IsInRange = Decoder.get();
         }
+        UE_LOG(LogTemp, Log, TEXT("[Radar] Distance=%.2f km  Bearing=%.1f°  InRange=%s"),
+            Contact.Distance, Contact.Bearing, Contact.IsInRange ? TEXT("true") : TEXT("false"));
         RadarQueue->Enqueue(Contact);
     }
 }

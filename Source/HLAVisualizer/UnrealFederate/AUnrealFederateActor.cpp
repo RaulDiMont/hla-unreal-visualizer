@@ -3,6 +3,7 @@
 #include "HAL/RunnableThread.h"
 #include "CesiumGlobeAnchorComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Materials/MaterialInterface.h"
 #include "Settings/UHLASettings.h"
 
 AUnrealFederateActor::AUnrealFederateActor()
@@ -22,6 +23,9 @@ void AUnrealFederateActor::BeginPlay()
     const UHLASettings* Settings = GetDefault<UHLASettings>();
     UE_LOG(LogTemp, Log, TEXT("UnrealFederate: RTI address = '%s', federation = '%s'"),
            *Settings->RTIAddress, *Settings->FederationName);
+
+    // Bind the material-switch handler before the HLA thread can start firing events.
+    OnRadarRangeChanged.AddDynamic(this, &AUnrealFederateActor::HandleRadarRangeChanged);
 
     HLARunnable = new FHLAFederateRunnable(
         &AircraftStateQueue, &RadarContactQueue,
@@ -57,11 +61,27 @@ void AUnrealFederateActor::Tick(float DeltaTime)
 
     // Drain the radar queue, keeping only the latest contact.
     FRadarContact Contact;
+    bool bHadRadarUpdate = false;
     while (RadarContactQueue.Dequeue(Contact))
     {
-        bIsInRange = Contact.IsInRange;
+        bHadRadarUpdate = true;
     }
-    // Phase 5: material switching on bIsInRange goes here.
+
+    // Only broadcast when the state actually transitions — avoids SetMaterial every frame.
+    if (bHadRadarUpdate && Contact.IsInRange != bIsInRange)
+    {
+        bIsInRange = Contact.IsInRange;
+        OnRadarRangeChanged.Broadcast(bIsInRange);
+    }
+}
+
+void AUnrealFederateActor::HandleRadarRangeChanged(bool bInRange)
+{
+    if (!AircraftMesh) return;
+
+    // Overlay sits on top of all 50 livery material slots without replacing them.
+    // Passing nullptr clears the overlay and restores the original mesh appearance.
+    AircraftMesh->SetOverlayMaterial(bInRange ? M_InRange : nullptr);
 }
 
 void AUnrealFederateActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -76,6 +96,9 @@ void AUnrealFederateActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
     delete HLARunnable;
     HLARunnable = nullptr;
+
+    // Remove after the HLA thread is fully stopped — no Broadcast can fire past this point.
+    OnRadarRangeChanged.RemoveDynamic(this, &AUnrealFederateActor::HandleRadarRangeChanged);
 
     Super::EndPlay(EndPlayReason);
 }

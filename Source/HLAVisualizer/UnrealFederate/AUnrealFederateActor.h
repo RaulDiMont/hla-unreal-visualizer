@@ -9,7 +9,13 @@
 
 class UCesiumGlobeAnchorComponent;
 class UStaticMeshComponent;
+class UMaterialInterface;
 class FHLAFederateRunnable;
+
+// Fired on the GameThread whenever the A320's radar contact state transitions.
+// bInRange = true  → aircraft has entered the 60 km radar range.
+// bInRange = false → aircraft has left the range (or simulation reset).
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRadarRangeChanged, bool, bInRange);
 
 // Subscribes to AircraftFederate and RadarFederate via HLA and drives the A320 mesh
 // over Cesium-georeferenced Madrid terrain.
@@ -42,6 +48,16 @@ public:
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "HLA|Aircraft")
     TObjectPtr<UStaticMeshComponent> AircraftMesh;
 
+    // Fired whenever IsInRange transitions. BlueprintAssignable so Blueprints can also react.
+    UPROPERTY(BlueprintAssignable, Category = "HLA|Radar")
+    FOnRadarRangeChanged OnRadarRangeChanged;
+
+    // Overlay material applied on top of all mesh slots when the A320 is inside radar range.
+    // When outside range the overlay is cleared (nullptr) — original livery materials are restored.
+    // Assign in the Details panel. Must use Blend Mode: Translucent.
+    UPROPERTY(EditAnywhere, Category = "HLA|Materials")
+    TObjectPtr<UMaterialInterface> M_InRange;
+
 private:
     // SPSC queues: HLA thread produces, GameThread (Tick) consumes.
     TQueue<FAircraftState, EQueueMode::Spsc> AircraftStateQueue;
@@ -50,7 +66,10 @@ private:
     FHLAFederateRunnable* HLARunnable = nullptr;
     FRunnableThread*      HLAThread   = nullptr;
 
-    // Tracks the latest radar state between frames.
-    // Used in Phase 5 for A320 material switching (IsInRange highlight).
+    // Tracks the latest radar state between frames to detect transitions.
     bool bIsInRange = false;
+
+    // Bound to OnRadarRangeChanged in BeginPlay — swaps AircraftMesh material slot 0.
+    UFUNCTION()
+    void HandleRadarRangeChanged(bool bInRange);
 };

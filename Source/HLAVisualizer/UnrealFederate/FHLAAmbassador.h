@@ -50,6 +50,15 @@ public:
         std::wstring const&            theObjectInstanceName)
         RTI_THROW((rti1516e::FederateInternalError)) override;
 
+    // 6.15 — called when a federate that owns an object resigns or deletes it.
+    // Used to detect normal simulation end (AircraftFederate resigned cleanly).
+    virtual void removeObjectInstance(
+        rti1516e::ObjectInstanceHandle      theObject,
+        rti1516e::VariableLengthData const& theUserSuppliedTag,
+        rti1516e::OrderType                 sentOrder,
+        rti1516e::SupplementalRemoveInfo    theRemoveInfo)
+        RTI_THROW((rti1516e::FederateInternalError)) override;
+
     // 6.11 — timestamp-free variant; used because we run without HLA Time Management.
     virtual void reflectAttributeValues(
         rti1516e::ObjectInstanceHandle           theObject,

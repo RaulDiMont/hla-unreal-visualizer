@@ -31,7 +31,8 @@ public:
         TQueue<FAircraftState, EQueueMode::Spsc>* InAircraftQueue,
         TQueue<FRadarContact,  EQueueMode::Spsc>* InRadarQueue,
         FString                                   InRtiAddress,
-        FString                                   InFederationName);
+        FString                                   InFederationName,
+        TFunction<void()>                         InOnConnectionLost);
 
     virtual ~FHLAFederateRunnable() override;
 
@@ -53,6 +54,10 @@ private:
 
     std::atomic<bool> bRunning   { false };
     std::atomic<bool> bConnected { false };  // false once evokeCallback signals connection loss
+
+    // Invoked on the GameThread when the simulation ends — either by connection loss or
+    // normal federate resignation. Marshaled via AsyncTask from the HLA thread.
+    TFunction<void()> OnConnectionLostCallback;
 
     std::wstring RtiUrl;
     std::wstring FederationNameW;

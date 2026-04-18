@@ -12,9 +12,11 @@ FHLAFederateRunnable::FHLAFederateRunnable(
     TQueue<FAircraftState, EQueueMode::Spsc>* InAircraftQueue,
     TQueue<FRadarContact,  EQueueMode::Spsc>* InRadarQueue,
     FString                                   InRtiAddress,
-    FString                                   InFederationName)
+    FString                                   InFederationName,
+    TFunction<void()>                         InOnConnectionLost)
     : AircraftQueue(InAircraftQueue)
     , RadarQueue(InRadarQueue)
+    , OnConnectionLostCallback(MoveTemp(InOnConnectionLost))
     , RtiUrl(*InRtiAddress)
     , FederationNameW(*InFederationName)
 {
@@ -133,8 +135,7 @@ uint32 FHLAFederateRunnable::Run()
             // connection was lost. Stop the pump and mark as disconnected so Stop()
             // does not attempt resign/disconnect on a dead ambassador.
             UE_LOG(LogTemp, Warning, TEXT("UnrealFederate: evokeCallback threw — federation ended, stopping pump"));
-            bConnected.store(false);
-            bRunning.store(false);
+            SignalConnectionLost();
         }
     }
     return 0;
@@ -148,6 +149,12 @@ void FHLAFederateRunnable::SignalConnectionLost()
     // so we must not touch RtiAmbassador after this call.
     bConnected.store(false);
     bRunning.store(false);
+
+    // Marshal the notification to the GameThread — connectionLost fires on the HLA thread.
+    if (OnConnectionLostCallback)
+    {
+        AsyncTask(ENamedThreads::GameThread, OnConnectionLostCallback);
+    }
 }
 
 void FHLAFederateRunnable::Stop()

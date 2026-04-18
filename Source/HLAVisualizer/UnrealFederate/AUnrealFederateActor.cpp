@@ -25,14 +25,30 @@ void AUnrealFederateActor::BeginPlay()
     UE_LOG(LogTemp, Log, TEXT("UnrealFederate: RTI address = '%s', federation = '%s'"),
            *Settings->RTIAddress, *Settings->FederationName);
 
-    // Bind the material-switch handler before the HLA thread can start firing events.
+    // Bind handlers before the HLA thread can start firing events.
     OnRadarRangeChanged.AddDynamic(this, &AUnrealFederateActor::HandleRadarRangeChanged);
+    OnSimulationStarted.AddDynamic(this, &AUnrealFederateActor::HandleSimulationStarted);
+    OnSimulationEnded.AddDynamic(this,   &AUnrealFederateActor::HandleSimulationEnded);
 
+    // Show initial status — same key (100) is reused by all status messages.
+    if (GEngine)
+    {
+        GEngine->AddOnScreenDebugMessage(100, 99999.f, FColor::Yellow, TEXT("Waiting for simulation..."));
+    }
+
+    // Pass a weak-captured lambda so the HLA thread can signal GameThread on connection loss.
+    TWeakObjectPtr<AUnrealFederateActor> WeakThis(this);
     HLARunnable = new FHLAFederateRunnable(
         &AircraftStateQueue, &RadarContactQueue,
-        Settings->RTIAddress, Settings->FederationName);
-    HLAThread   = FRunnableThread::Create(HLARunnable, TEXT("HLAFederateThread"),
-                                          0, TPri_Normal);
+        Settings->RTIAddress, Settings->FederationName,
+        [WeakThis]()
+        {
+            if (WeakThis.IsValid())
+            {
+                WeakThis->OnSimulationEnded.Broadcast();
+            }
+        });
+    HLAThread = FRunnableThread::Create(HLARunnable, TEXT("HLAFederateThread"), 0, TPri_Normal);
 
     if (!HLAThread)
     {
@@ -55,6 +71,13 @@ void AUnrealFederateActor::Tick(float DeltaTime)
         {
             PositionBuffer.RemoveAt(0, PositionBuffer.Num() - 3);
         }
+    }
+
+    // Fire OnSimulationStarted once on the first received state.
+    if (!bHasReceivedData && PositionBuffer.Num() > 0)
+    {
+        bHasReceivedData = true;
+        OnSimulationStarted.Broadcast();
     }
 
     // Interpolate position at RenderTime = Now - InterpolationDelaySeconds.
@@ -119,11 +142,41 @@ void AUnrealFederateActor::Tick(float DeltaTime)
 
 void AUnrealFederateActor::HandleRadarRangeChanged(bool bInRange)
 {
-    if (!AircraftMesh) return;
+    if (AircraftMesh)
+    {
+        AircraftMesh->SetOverlayMaterial(bInRange ? M_InRange : nullptr);
+    }
 
-    // Overlay sits on top of all 50 livery material slots without replacing them.
-    // Passing nullptr clears the overlay and restores the original mesh appearance.
-    AircraftMesh->SetOverlayMaterial(bInRange ? M_InRange : nullptr);
+    if (GEngine)
+    {
+        if (bInRange)
+            GEngine->AddOnScreenDebugMessage(101, 99999.f, FColor::Green, TEXT("In radar's range"));
+        else
+            GEngine->AddOnScreenDebugMessage(101, 99999.f, FColor::White,  TEXT("Out of radar's range"));
+    }
+}
+
+void AUnrealFederateActor::HandleSimulationStarted()
+{
+    if (GEngine)
+    {
+        GEngine->AddOnScreenDebugMessage(100, 99999.f, FColor::Green, TEXT("Simulation running"));
+        GEngine->AddOnScreenDebugMessage(101, 99999.f, FColor::White, TEXT("Out of radar's range"));
+    }
+}
+
+void AUnrealFederateActor::HandleSimulationEnded()
+{
+    if (AircraftMesh)
+    {
+        AircraftMesh->SetOverlayMaterial(nullptr);
+    }
+
+    if (GEngine)
+    {
+        GEngine->AddOnScreenDebugMessage(100, 99999.f, FColor::Red,  TEXT("Simulation ended"));
+        GEngine->RemoveOnScreenDebugMessage(101);
+    }
 }
 
 void AUnrealFederateActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -141,6 +194,13 @@ void AUnrealFederateActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
     // Remove after the HLA thread is fully stopped — no Broadcast can fire past this point.
     OnRadarRangeChanged.RemoveDynamic(this, &AUnrealFederateActor::HandleRadarRangeChanged);
+    OnSimulationStarted.RemoveDynamic(this, &AUnrealFederateActor::HandleSimulationStarted);
+    OnSimulationEnded.RemoveDynamic(this,   &AUnrealFederateActor::HandleSimulationEnded);
+
+    if (GEngine)
+    {
+        GEngine->RemoveOnScreenDebugMessage(100);
+    }
 
     Super::EndPlay(EndPlayReason);
 }

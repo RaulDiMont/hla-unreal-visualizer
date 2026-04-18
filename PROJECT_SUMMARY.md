@@ -24,7 +24,7 @@ RadarFederate     ─┘                        │
   publishes                                 ├── Tick() [GameThread]
   Distance/Bearing/IsInRange                │     GlobeAnchor.MoveToLongLatHeight()
                                             └── ARadarVisualizationActor
-MonitorFederate                                   procedural 60 km ring at LEMD
+MonitorFederate                                   procedural 10 km ring at LEMD
   (console only, WSL2)
 ```
 
@@ -59,9 +59,10 @@ MonitorFederate                                   procedural 60 km ring at LEMD
 - Altitude conversion: JSBSim feet → Cesium metres (× 0.3048) happens once on the GameThread
 
 ### Phase 5 — Radar visualization
-- `ARadarVisualizationActor`: procedural flat ring around LEMD, 60 km radius, 128 segments
+- `ARadarVisualizationActor`: procedural flat ring around LEMD, 10 km radius, 128 segments
 - `AUnrealFederateActor` also subscribes to `RadarContact` (Distance, Bearing, IsInRange)
-- `bIsInRange` state tracked per frame; material switching hook ready in `Tick()` 
+- `OnRadarRangeChanged` delegate fires on `bIsInRange` transitions; `SetOverlayMaterial()` switches `M_InRange` overlay on/off
+- On-screen status messages: "Waiting for simulation…", "Simulation running", "In radar's range", "Simulation ended"
 - Radar actor anchored to LEMD via `UCesiumGlobeAnchorComponent`
 
 ---
@@ -171,9 +172,8 @@ No source edits are needed when the WSL2 IP changes between sessions.
 | 2 | Complete | Cesium for Unreal + Madrid-Barajas terrain |
 | 3 | Complete | OpenRTI as Unreal ThirdParty module |
 | 4 | Complete | UnrealFederate Actor — HLA subscriber + A320 mesh positioning |
-| 5 | Complete | Radar visualization — range circle + IsInRange state tracking |
-| 6 | Pending | A320 material highlight — create `M_A320_Normal` and `M_A320_InRange` material assets, wire `bIsInRange` to `AircraftMesh->SetMaterial()` in `Tick()` (hook already in place) |
-| 7 | Pending | Reconnect logic — detect federation restart, re-run the connect + subscribe sequence without requiring a Play stop/restart in the Editor |
-| 8 | Pending | Clean HLA shutdown — implement `resignFederationExecution()` + `disconnect()` in `FHLAFederateRunnable::Stop()` once the OpenRTI crash-on-dead-federation issue is resolved upstream or worked around |
+| 5 | Complete | Radar visualization — 10 km range circle + `SetOverlayMaterial()` switching + on-screen status UI |
+| 6 | Pending | Reconnect logic — detect federation restart, re-run the connect + subscribe sequence without requiring a Play stop/restart in the Editor |
+| 7 | Pending | Clean HLA shutdown — implement `resignFederationExecution()` + `disconnect()` in `FHLAFederateRunnable::Stop()` once the OpenRTI crash-on-dead-federation issue is resolved upstream or worked around |
 | 9 | Pending | Terrain-conforming radar circle — project ring vertices onto Cesium terrain height instead of a flat plane at fixed altitude |
 | 10 | Pending | HLA Time Management — add TAR/TAG time advance requests to synchronize the UnrealFederate with the simulation clock instead of using wall-clock pacing |

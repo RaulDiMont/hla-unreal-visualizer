@@ -1,5 +1,6 @@
 #include "FHLAAmbassador.h"
 #include "FHLAFederateRunnable.h"
+#include "HAL/PlatformTime.h"
 
 THIRD_PARTY_INCLUDES_START
 #include <RTI/encoding/BasicDataElements.h>
@@ -54,6 +55,22 @@ void FHLAAmbassador::discoverObjectInstance(
     InstanceClassMap[theObject] = theObjectClass;
 }
 
+void FHLAAmbassador::removeObjectInstance(
+    rti1516e::ObjectInstanceHandle      theObject,
+    rti1516e::VariableLengthData const& theUserSuppliedTag,
+    rti1516e::OrderType                 sentOrder,
+    rti1516e::SupplementalRemoveInfo    theRemoveInfo)
+    RTI_THROW((rti1516e::FederateInternalError))
+{
+    std::map<rti1516e::ObjectInstanceHandle, rti1516e::ObjectClassHandle>::iterator It = InstanceClassMap.find(theObject);
+    if (It != InstanceClassMap.end() && It->second == AircraftClass)
+    {
+        UE_LOG(LogTemp, Log, TEXT("UnrealFederate: Aircraft object removed — simulation ended."));
+        Owner->SignalConnectionLost();
+    }
+    InstanceClassMap.erase(theObject);
+}
+
 void FHLAAmbassador::reflectAttributeValues(
     rti1516e::ObjectInstanceHandle           theObject,
     rti1516e::AttributeHandleValueMap const& theAttributeValues,
@@ -63,7 +80,7 @@ void FHLAAmbassador::reflectAttributeValues(
     rti1516e::SupplementalReflectInfo        theReflectInfo)
     RTI_THROW((rti1516e::FederateInternalError))
 {
-    auto It = InstanceClassMap.find(theObject);
+    std::map<rti1516e::ObjectInstanceHandle, rti1516e::ObjectClassHandle>::iterator It = InstanceClassMap.find(theObject);
     if (It == InstanceClassMap.end())
     {
         return;
@@ -76,20 +93,9 @@ void FHLAAmbassador::reflectAttributeValues(
     // which is the IEEE 1516-2010 standard network encoding.
     auto DecodeFloat64 = [&](rti1516e::AttributeHandle Handle, double& Out) -> bool
     {
-        auto It = theAttributeValues.find(Handle);
+        rti1516e::AttributeHandleValueMap::const_iterator It = theAttributeValues.find(Handle);
         if (It == theAttributeValues.end()) return false;
         rti1516e::HLAfloat64BE decoder;
-        decoder.decode(It->second);
-        Out = decoder.get();
-        return true;
-    };
-
-    // Decode a HLAfloat32BE attribute into a float.
-    auto DecodeFloat32 = [&](rti1516e::AttributeHandle Handle, float& Out) -> bool
-    {
-        auto It = theAttributeValues.find(Handle);
-        if (It == theAttributeValues.end()) return false;
-        rti1516e::HLAfloat32BE decoder;
         decoder.decode(It->second);
         Out = decoder.get();
         return true;
@@ -101,19 +107,26 @@ void FHLAAmbassador::reflectAttributeValues(
         DecodeFloat64(LatitudeHandle,  State.Latitude);
         DecodeFloat64(LongitudeHandle, State.Longitude);
         DecodeFloat64(AltitudeHandle,  State.Altitude);
+        State.Timestamp = FPlatformTime::Seconds();
+        UE_LOG(LogTemp, Log, TEXT("[Aircraft] Lat=%.6f  Lon=%.6f  Alt=%.1f ft"),
+            State.Latitude, State.Longitude, State.Altitude);
         AircraftQueue->Enqueue(State);
     }
     else if (ObjectClass == RadarContactClass)
     {
         FRadarContact Contact;
-        DecodeFloat32(DistanceHandle, Contact.Distance);
-        DecodeFloat32(BearingHandle,  Contact.Bearing);
-        // IsInRange — check RadarFederate encoding; assume HLAboolean (1 byte) for now.
-        auto InRangeIt = theAttributeValues.find(IsInRangeHandle);
-        if (InRangeIt != theAttributeValues.end() && InRangeIt->second.size() == 1)
+        DecodeFloat64(DistanceHandle, Contact.Distance);
+        DecodeFloat64(BearingHandle,  Contact.Bearing);
+        // IsInRange — HLAboolean (4 bytes). OpenRTI wraps it as bool via get().
+        rti1516e::AttributeHandleValueMap::const_iterator InRangeIt = theAttributeValues.find(IsInRangeHandle);
+        if (InRangeIt != theAttributeValues.end())
         {
-            Contact.IsInRange = (*static_cast<const uint8_t*>(InRangeIt->second.data()) != 0);
+            rti1516e::HLAboolean Decoder;
+            Decoder.decode(InRangeIt->second);
+            Contact.IsInRange = Decoder.get();
         }
+        UE_LOG(LogTemp, Log, TEXT("[Radar] Distance=%.2f km  Bearing=%.1f°  InRange=%s"),
+            Contact.Distance, Contact.Bearing, Contact.IsInRange ? TEXT("true") : TEXT("false"));
         RadarQueue->Enqueue(Contact);
     }
 }

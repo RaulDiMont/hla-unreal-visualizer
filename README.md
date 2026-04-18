@@ -15,7 +15,7 @@ subscribes to that data and drives the aircraft mesh and radar range circle on e
 - Full HLA 1516e federation with four federates spanning two operating systems (WSL2 + Windows)
 - Lock-free multithreading: HLA callbacks on a dedicated thread, Unreal Actor updates on the GameThread
 - Cesium for Unreal georeferencing: WGS84 lat/lon/altitude → Unreal world coordinates
-- Procedural radar range circle anchored to LEMD (60 km radius)
+- Procedural radar range circle anchored to LEMD (10 km radius)
 - Configurable RTI address exposed through Unreal Project Settings (no source edits needed)
 
 ---

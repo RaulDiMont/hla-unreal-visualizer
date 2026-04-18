@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Materials/MaterialInterface.h"
 #include "ARadarVisualizationActor.generated.h"
 
 class UProceduralMeshComponent;
@@ -39,7 +40,7 @@ public:
 
     // Outer radius of the ring in kilometres. Must match the RadarFederate detection range.
     UPROPERTY(EditAnywhere, Category = "Radar", meta = (ClampMin = "1.0"))
-    float RadiusKm = 60.0f;
+    float RadiusKm = 10.0f;
 
     // Ring thickness in kilometres (visual only — does not affect radar logic).
     UPROPERTY(EditAnywhere, Category = "Radar", meta = (ClampMin = "0.1"))

@@ -8,6 +8,8 @@ subscribes to that data and drives the aircraft mesh and radar range circle on e
 
 **Related project (HLA simulator):** https://github.com/RaulDiMont/hla-simulator
 
+![HLA Visualizer demo](readme-images/hla-simulator-visualizer.gif)
+
 ---
 
 ## What it demonstrates
@@ -86,6 +88,8 @@ ThirdParty/OpenRTI/
 A free account at [cesium.com/ion](https://cesium.com/ion) is required to stream World Terrain.
 Generate an access token, then paste it via **Window → Cesium** (the Cesium panel) inside the Unreal Editor.
 
+![Cesium panel](readme-images/cesium-window.png)
+
 > In Cesium for Unreal v2.x the token is set in the Cesium panel, **not** in Project Settings.
 
 Each contributor needs their own token. `Content/CesiumSettings/` is gitignored to prevent tokens
@@ -104,6 +108,8 @@ WSL2 virtual IP — you will need it in step 3:
 ip addr show eth0 | grep "inet "
 # Example output: inet 172.26.53.127/20 ...
 ```
+
+![HLA simulator terminals](readme-images/hla_simulator_output.png)
 
 > **Windows Firewall:** if the Unreal client cannot reach `rtinode`, allow inbound TCP on
 > port 14321 in Windows Defender Firewall → Inbound Rules → New Rule → Port → TCP 14321.
@@ -124,6 +130,8 @@ Go to **Edit → Project Settings → Plugins → HLA Visualizer** and update:
 | Federation Name | `AircraftSimulation` |
 
 > The WSL2 IP changes on reboot. Update this setting each session.
+
+![RTI address setting](readme-images/setting-rti-addres.png)
 
 ### 4 — Press Play
 

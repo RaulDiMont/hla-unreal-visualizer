@@ -179,27 +179,6 @@ ThirdParty/OpenRTI/
 
 For architecture details, threading model, and design decisions see [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md).
 
----
-
-## Building from CLI
-
-```
-"C:\Program Files\Epic Games\UE_5.5\Engine\Build\BatchFiles\Build.bat" ^
-    HLAVisualizerEditor Win64 Development ^
-    "C:\Repos\hla_visualizer\HLAVisualizer\HLAVisualizer.uproject"
-```
-
-After adding new `.h`/`.cpp` files or editing `.Build.cs`, regenerate project files first:
-
-```
-"C:\Program Files\Epic Games\UE_5.5\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.exe" ^
-    -projectfiles ^
-    -project="C:\Repos\hla_visualizer\HLAVisualizer\HLAVisualizer.uproject" ^
-    -game -rocket -progress
-```
-
----
-
 ## Known limitations
 
 - The WSL2 virtual IP changes on every reboot — update Project Settings each session

@@ -16,13 +16,16 @@ The full stack spans two operating systems and four HLA federates:
 WSL2 (Linux)                              Windows (Unreal Engine 5.5)
 ─────────────────────────────────         ─────────────────────────────────
 AircraftFederate  ─┐                      AUnrealFederateActor
-  JSBSim A320       │   HLA 1516e            ├── FHLAFederateRunnable (thread)
-  publishes         │   over TCP             │     └── FHLAAmbassador
-  Lat/Lon/Alt       ├─► rtinode ──────────► │           reflectAttributeValues()
-                    │   port 14321          │     → TQueue<FAircraftState>
-RadarFederate     ─┘                        │
-  publishes                                 ├── Tick() [GameThread]
-  Distance/Bearing/IsInRange                │     GlobeAnchor.MoveToLongLatHeight()
+  JSBSim A320       │   HLA 1516e            ├── BeginPlay → AsyncTask (background)
+  publishes         │   over TCP             │       connect / join / subscribe
+  Lat/Lon/Alt       ├─► rtinode ──────────► │       up to 30 retries × 2 s
+                    │   port 14321          │
+RadarFederate     ─┘                        ├── Tick (GameThread)
+  publishes                                 │     evokeCallback(0.0)
+  Distance/Bearing/IsInRange                │       → FHLAAmbassador callbacks
+                                            │         → OnAircraftStateReceived
+                                            │         → OnRadarContactReceived
+                                            │     GlobeAnchor.MoveToLongLatHeight
                                             └── ARadarVisualizationActor
 MonitorFederate                                   procedural 10 km ring at LEMD
   (console only, WSL2)
@@ -52,11 +55,13 @@ MonitorFederate                                   procedural 10 km ring at LEMD
 - **Critical finding:** The correct link targets are `rti1516e.lib` + `fedtime1516e.lib`, not `OpenRTI.lib` directly. The include path must point to `include/rti1516e/` for `#include <RTI/RTI1516.h>` to resolve.
 
 ### Phase 4 — UnrealFederate Actor
-- `AUnrealFederateActor`: subscribes to `Aircraft` object class (Latitude, Longitude, Altitude)
-- `FHLAFederateRunnable`: dedicated HLA thread with async connect + retry loop (30 retries, 2s interval)
-- `FHLAAmbassador`: HLA 1516e NullFederateAmbassador callbacks, caches object/attribute handles
+- `AUnrealFederateActor`: subscribes to `Aircraft` object class (Latitude, Longitude, Altitude); owns the `RTIambassador` and the `FHLAAmbassador`; pumps HLA callbacks from `Tick`
+- Background `AsyncTask` runs the blocking connect / join / subscribe sequence with up to 30 retries × 2 s. Cancellable via a shared atomic flag so `EndPlay` aborts the loop on the next sleep boundary.
+- `FHLAAmbassador`: HLA 1516e NullFederateAmbassador callbacks, caches object/attribute handles, dispatches each callback directly to the actor on the GameThread (guarded by `IsInGameThread()`)
 - Position updates drive `UCesiumGlobeAnchorComponent::MoveToLongitudeLatitudeHeight()`
 - Altitude conversion: JSBSim feet → Cesium metres (× 0.3048) happens once on the GameThread
+
+> **Architecture note.** An earlier iteration of Phase 4 used a dedicated `FRunnable` thread plus two SPSC `TQueue`s to bridge HLA callbacks to the GameThread. With JSBSim publishing at 1 Hz and per-message decode work in the microsecond range, the multithreading complexity was over-engineering. The current design keeps a background thread only for what truly must be off the GameThread (the blocking connect/retry loop) and runs the HLA pump itself directly in `Tick` via `evokeCallback(0.0)`. See the [Threading model](#threading-model) section below for details.
 
 ### Phase 5 — Radar visualization
 - `ARadarVisualizationActor`: procedural flat ring around LEMD, 10 km radius, 128 segments
@@ -71,44 +76,73 @@ MonitorFederate                                   procedural 10 km ring at LEMD
 
 ### Threading model
 
-HLA callbacks are not safe to call from the Unreal GameThread, and Unreal Actor/Component
-updates are not safe to call from any other thread. The bridge uses lock-free SPSC queues:
+The simulation publishes at 1 Hz and per-message decode work is trivial (three `HLAfloat64BE`
+values), so almost the entire HLA flow can live on the GameThread:
 
 ```
-FHLAFederateRunnable (HLA thread)
-  │  FHLAAmbassador::reflectAttributeValues()
-  │  → TQueue<FAircraftState>.Enqueue()   [SPSC, lock-free]
-  │  → TQueue<FRadarContact>.Enqueue()    [SPSC, lock-free]
-  │
-AUnrealFederateActor::Tick() (GameThread)
-  │  → Dequeue all pending states, keep only latest (avoids position lag accumulation)
-  │  → UCesiumGlobeAnchorComponent::MoveToLongitudeLatitudeHeight()
-  │  → bIsInRange update for material switching
+BeginPlay (GameThread)
+  │  caches RTIAddress / FederationName, constructs FHLAAmbassador
+  │  ConnectionState = Connecting
+  ↓
+AsyncTask (background — AnyBackgroundThreadNormalTask)
+  │  for i in 1..30:
+  │    if ShouldStopFlag → return
+  │    try: createRTIambassador → connect → joinFederationExecution → subscribe
+  │    on success: break
+  │    on failure: sleep(2s), retry
+  │  AsyncTask(GameThread): hand RTIambassador to actor, ConnectionState = Connected
+
+Tick (GameThread, every frame)
+  │  if Connected: evokeCallback(0.0)            non-blocking poll
+  │     → FHLAAmbassador::reflectAttributeValues fires synchronously
+  │       → OnAircraftStateReceived(State)       direct UObject mutation, no queue
+  │       → OnRadarContactReceived(Contact)
+  │     → FHLAAmbassador::removeObjectInstance / connectionLost
+  │       → OnFederationLost()                   idempotent state transition
+  │  interpolate PositionBuffer via Lagrange and MoveToLongitudeLatitudeHeight
 ```
 
-`TQueue<T, EQueueMode::Spsc>` is Unreal's built-in lock-free single-producer single-consumer queue.
-It allows exactly one producer thread and one consumer thread — which matches the HLA thread + GameThread pattern perfectly.
+There are **no SPSC queues and no marshaling between threads during normal operation**: the
+HLA callbacks fire on the GameThread because that is where `evokeCallback` is called from.
+The single background thread exists only for the 30-retry connect loop, which is genuinely
+unable to run on the GameThread (a single failed `connect()` can block for seconds, and 60 s
+of retries would freeze the editor).
 
-### Async connect with retry
+**Lifetime safety.** The connect AsyncTask captures three things:
+- `TWeakObjectPtr<AUnrealFederateActor>` — never dereferenced from the background thread; only
+  used inside the marshal-back-to-GameThread lambda for safe access.
+- `TSharedPtr<FHLAAmbassador>` and `std::shared_ptr<rti1516e::RTIambassador>` (after success) —
+  shared ownership so the resources stay alive even if the actor is destroyed mid-connect.
+- `TSharedPtr<std::atomic<bool>> ShouldStopFlag` — `EndPlay` flips it to `true`; the worker
+  checks it before and after each `Sleep` to abort early without dereferencing the actor.
 
-The HLA thread (`FHLAFederateRunnable::Run()`) attempts to connect before entering the event pump.
-It retries up to 30 times with a 2-second interval, logging progress each attempt.
-This means you can press Play in the Unreal Editor before `rtinode` or `aircraft_simulator` are fully started.
+The `FHLAAmbassador::reflectAttributeValues` dispatch is wrapped in `if (IsInGameThread())`
+with an `AsyncTask(ENamedThreads::GameThread, ...)` fallback. In normal operation the guard
+takes the fast path; the fallback covers the theoretical case of OpenRTI raising a callback
+during `connect()` / `joinFederationExecution()` on the worker thread.
 
 ### Shutdown sequence
 
 ```
 EndPlay() [GameThread]
-  → HLARunnable->Stop()           sets bRunning = false (atomic)
-  → HLAThread->Kill(true)         waits for Run() to exit (evokeCallback blocks max 0.1s)
-  → delete HLAThread, HLARunnable
+  → ShouldStopFlag->store(true)        signals the connect AsyncTask to abort on next sleep
+  → ConnectionState = Stopped          guards Tick from calling evokeCallback
+  → RtiAmbassador.reset()              drops local ref; worker may still hold one
+  → Ambassador.Reset()                 same
+  → unbind delegates, clear on-screen messages
 ```
 
-`Stop()` intentionally skips `resignFederationExecution()` and `disconnect()`. If the WSL2 simulation
-has already ended, OpenRTI holds a dangling pointer to the destroyed federation and calling resign
-causes an access violation inside OpenRTI that cannot be caught via C++ exceptions.
-The clean shutdown path when the simulation ends first is via `FHLAAmbassador::connectionLost()`,
-which calls `SignalConnectionLost()` and exits the `Run()` loop before OpenRTI tears down.
+`EndPlay` does not block waiting for the worker to finish. If the worker is mid-`connect()`
+when `EndPlay` runs, the captured `shared_ptr`s keep the ambassador and any partial RTI alive
+on the worker thread; when `connect()` finally returns or throws, the worker checks
+`ShouldStopFlag` and exits, releasing its references.
+
+Resign and disconnect are skipped intentionally. If the WSL2 simulation ended first,
+OpenRTI holds a dangling pointer to the destroyed federation and calling `resignFederationExecution()`
+causes an access violation inside OpenRTI that cannot be caught via C++ exceptions. The clean
+path when the simulator ends first is `FHLAAmbassador::connectionLost()` → `OnFederationLost()`
+on the GameThread, which flips `ConnectionState` to `Stopped` so `Tick` stops pumping before
+OpenRTI tears down.
 
 ### Coordinate conversion
 
@@ -132,12 +166,11 @@ No source edits are needed when the WSL2 IP changes between sessions.
 
 | Class | File | Role |
 |---|---|---|
-| `AUnrealFederateActor` | `UnrealFederate/AUnrealFederateActor.h/.cpp` | Main Actor: owns HLA thread, drives A320 mesh via Cesium |
-| `FHLAFederateRunnable` | `UnrealFederate/FHLAFederateRunnable.h/.cpp` | FRunnable: connect loop, evokeCallback pump, Stop() |
-| `FHLAAmbassador` | `UnrealFederate/FHLAAmbassador.h/.cpp` | NullFederateAmbassador: reflectAttributeValues callbacks |
+| `AUnrealFederateActor` | `UnrealFederate/AUnrealFederateActor.h/.cpp` | Main Actor: owns the `RTIambassador` and ambassador, runs the connect `AsyncTask`, pumps `evokeCallback` from `Tick`, drives the A320 mesh via Cesium |
+| `FHLAAmbassador` | `UnrealFederate/FHLAAmbassador.h/.cpp` | `NullFederateAmbassador`: decodes attributes, dispatches to the actor on the GameThread (guarded by `IsInGameThread()`) |
 | `ARadarVisualizationActor` | `Radar/ARadarVisualizationActor.h/.cpp` | Procedural ring mesh anchored to LEMD |
 | `UHLASettings` | `Settings/UHLASettings.h/.cpp` | Project Settings: RTI address, federation name |
-| `FAircraftState` | `Types/FAircraftState.h` | POD struct: Latitude, Longitude, Altitude |
+| `FAircraftState` | `Types/FAircraftState.h` | POD struct: Latitude, Longitude, Altitude, Timestamp |
 | `FRadarContact` | `Types/FRadarContact.h` | POD struct: Distance, Bearing, IsInRange |
 
 ---
@@ -174,6 +207,6 @@ No source edits are needed when the WSL2 IP changes between sessions.
 | 4 | Complete | UnrealFederate Actor — HLA subscriber + A320 mesh positioning |
 | 5 | Complete | Radar visualization — 10 km range circle + `SetOverlayMaterial()` switching + on-screen status UI |
 | 6 | Pending | Reconnect logic — detect federation restart, re-run the connect + subscribe sequence without requiring a Play stop/restart in the Editor |
-| 7 | Pending | Clean HLA shutdown — implement `resignFederationExecution()` + `disconnect()` in `FHLAFederateRunnable::Stop()` once the OpenRTI crash-on-dead-federation issue is resolved upstream or worked around |
+| 7 | Pending | Clean HLA shutdown — call `resignFederationExecution()` + `disconnect()` from `EndPlay` / `OnFederationLost()` once the OpenRTI crash-on-dead-federation issue is resolved upstream or worked around |
 | 9 | Pending | Terrain-conforming radar circle — project ring vertices onto Cesium terrain height instead of a flat plane at fixed altitude |
 | 10 | Pending | HLA Time Management — add TAR/TAG time advance requests to synchronize the UnrealFederate with the simulation clock instead of using wall-clock pacing |

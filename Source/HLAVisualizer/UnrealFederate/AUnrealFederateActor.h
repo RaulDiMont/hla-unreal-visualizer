@@ -2,15 +2,24 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
-#include "Containers/Queue.h"
 #include "Materials/MaterialInterface.h"
+#include "Templates/SharedPointer.h"
 #include "Types/FAircraftState.h"
 #include "Types/FRadarContact.h"
+
+#include <atomic>
+#include <memory>
+
 #include "AUnrealFederateActor.generated.h"
 
 class UCesiumGlobeAnchorComponent;
 class UStaticMeshComponent;
-class FHLAFederateRunnable;
+class FHLAAmbassador;
+
+namespace rti1516e
+{
+    class RTIambassador;
+}
 
 // Fired on the GameThread whenever the A320's radar contact state transitions.
 // bInRange = true  → aircraft has entered the 60 km radar range.
@@ -27,10 +36,13 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSimulationEnded);
 // over Cesium-georeferenced Madrid terrain.
 //
 // Threading model:
-//   FHLAFederateRunnable (dedicated thread) → pushes to TQueues (SPSC, lock-free)
-//   Tick() (GameThread)                     → drains TQueues, updates GlobeAnchor
+//   AsyncTask (background) — runs the blocking connect / join / subscribe ONLY.
+//                            Cancellable via the shared atomic ShouldStopFlag.
+//   Tick (GameThread)      — once Connected, polls evokeCallback(0.0). All HLA
+//                            callbacks fire synchronously on the GameThread and
+//                            mutate state directly through the OnXxxReceived methods.
 //
-// All Unreal Actor/Component calls stay on the GameThread — never inside HLA callbacks.
+// All Unreal Actor/Component calls stay on the GameThread.
 UCLASS()
 class HLAVISUALIZER_API AUnrealFederateActor : public AActor
 {
@@ -38,6 +50,7 @@ class HLAVISUALIZER_API AUnrealFederateActor : public AActor
 
 public:
     AUnrealFederateActor();
+    virtual ~AUnrealFederateActor();
 
 protected:
     virtual void BeginPlay() override;
@@ -76,21 +89,29 @@ public:
     float InterpolationDelaySeconds = 2.0f;
 
 private:
-    // Circular buffer of the last 3 received states — used for Lagrange quadratic interpolation.
-    TArray<FAircraftState> PositionBuffer;
+    // FHLAAmbassador dispatches HLA callbacks directly into the actor's private receivers.
+    friend class FHLAAmbassador;
 
-    // SPSC queues: HLA thread produces, GameThread (Tick) consumes.
-    TQueue<FAircraftState, EQueueMode::Spsc> AircraftStateQueue;
-    TQueue<FRadarContact,  EQueueMode::Spsc> RadarContactQueue;
+    enum class EHLAConnectionState : uint8
+    {
+        Idle,        // before BeginPlay completes
+        Connecting,  // connect AsyncTask in flight
+        Connected,   // pump is live in Tick
+        Failed,      // gave up after kMaxConnectRetries
+        Stopped,     // EndPlay or federation lost
+    };
 
-    FHLAFederateRunnable* HLARunnable = nullptr;
-    FRunnableThread*      HLAThread   = nullptr;
+    // Launches the connect AsyncTask. Captures only weak-self + shared resources so
+    // the worker can outlive the actor briefly without dangling references.
+    void RunConnectionAsync();
 
-    // Tracks the latest radar state between frames to detect transitions.
-    bool bIsInRange = false;
+    // Drains any pending HLA callbacks. Called every Tick when Connected.
+    void PumpHLACallbacks();
 
-    // True after the first FAircraftState is received — guards OnSimulationStarted broadcast.
-    bool bHasReceivedData = false;
+    // Receivers — invoked from FHLAAmbassador on the GameThread (guarded by IsInGameThread).
+    void OnAircraftStateReceived(const FAircraftState& State);
+    void OnRadarContactReceived(const FRadarContact& Contact);
+    void OnFederationLost();
 
     // Bound to OnRadarRangeChanged in BeginPlay — swaps AircraftMesh overlay material.
     UFUNCTION()
@@ -101,4 +122,33 @@ private:
 
     UFUNCTION()
     void HandleSimulationEnded();
+
+    // Circular buffer of the last 3 received states — used for Lagrange quadratic interpolation.
+    TArray<FAircraftState> PositionBuffer;
+
+    // Tracks the latest radar state between frames to detect transitions.
+    bool bIsInRange = false;
+
+    // True after the first FAircraftState is received — guards OnSimulationStarted broadcast.
+    bool bHasReceivedData = false;
+
+    // Connection lifecycle. Read on GameThread; written by both GameThread (Tick/EndPlay)
+    // and the inner GameThread AsyncTask that the connect worker marshals back to.
+    std::atomic<EHLAConnectionState> ConnectionState { EHLAConnectionState::Idle };
+
+    // Shared atomic so the connect AsyncTask can detect cancellation without dereferencing
+    // this UObject from a background thread. EndPlay flips it to true; the worker checks it
+    // between sleeps and aborts the retry loop early.
+    TSharedPtr<std::atomic<bool>, ESPMode::ThreadSafe> ShouldStopFlag;
+
+    // Owned RTI ambassador. shared_ptr so the connect worker can keep it alive even if
+    // the actor is destroyed mid-connect (the worker holds its own copy of the pointer).
+    std::shared_ptr<rti1516e::RTIambassador> RtiAmbassador;
+
+    // Shared with the connect worker for the same lifetime reason as RtiAmbassador.
+    TSharedPtr<FHLAAmbassador, ESPMode::ThreadSafe> Ambassador;
+
+    // Cached at BeginPlay so the connect worker never reads UObject state from a background thread.
+    FString CachedRtiAddress;
+    FString CachedFederationName;
 };

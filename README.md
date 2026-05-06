@@ -15,7 +15,7 @@ subscribes to that data and drives the aircraft mesh and radar range circle on e
 ## What it demonstrates
 
 - Full HLA 1516e federation with four federates spanning two operating systems (WSL2 + Windows)
-- Lock-free multithreading: HLA callbacks on a dedicated thread, Unreal Actor updates on the GameThread
+- Background `AsyncTask` for the blocking HLA connect/retry phase; HLA event pump driven from `Tick` on the GameThread for direct UObject updates
 - Cesium for Unreal georeferencing: WGS84 lat/lon/altitude → Unreal world coordinates
 - Procedural radar range circle anchored to LEMD (10 km radius)
 - Configurable RTI address exposed through Unreal Project Settings (no source edits needed)
@@ -167,7 +167,7 @@ The main persistent level should contain:
 ```
 Source/HLAVisualizer/
 ├── Types/                       FAircraftState, FRadarContact structs
-├── UnrealFederate/              AUnrealFederateActor, FHLAFederateRunnable, FHLAAmbassador
+├── UnrealFederate/              AUnrealFederateActor, FHLAAmbassador
 ├── Radar/                       ARadarVisualizationActor (procedural ring mesh)
 └── Settings/                    UHLASettings (Project Settings integration)
 

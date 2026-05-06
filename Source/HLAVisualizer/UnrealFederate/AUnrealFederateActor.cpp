@@ -1,11 +1,25 @@
 #include "AUnrealFederateActor.h"
-#include "FHLAFederateRunnable.h"
-#include "HAL/RunnableThread.h"
+#include "FHLAAmbassador.h"
 #include "HAL/PlatformTime.h"
+#include "HAL/PlatformProcess.h"
+#include "Async/Async.h"
 #include "CesiumGlobeAnchorComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Materials/MaterialInterface.h"
 #include "Settings/UHLASettings.h"
+
+THIRD_PARTY_INCLUDES_START
+#include <RTI/RTIambassador.h>
+#include <RTI/RTIambassadorFactory.h>
+#include <RTI/Enums.h>
+THIRD_PARTY_INCLUDES_END
+
+namespace
+{
+    const std::wstring kFederateType = L"UnrealFederate";
+    constexpr int   kMaxConnectRetries     = 30;
+    constexpr float kConnectRetryIntervalS = 2.0f;
+}
 
 AUnrealFederateActor::AUnrealFederateActor()
 {
@@ -17,15 +31,21 @@ AUnrealFederateActor::AUnrealFederateActor()
     GlobeAnchor = CreateDefaultSubobject<UCesiumGlobeAnchorComponent>(TEXT("GlobeAnchor"));
 }
 
+// Defaulted in the .cpp where rti1516e::RTIambassador is a complete type — required for
+// std::shared_ptr<rti1516e::RTIambassador> to instantiate its destructor correctly.
+AUnrealFederateActor::~AUnrealFederateActor() = default;
+
 void AUnrealFederateActor::BeginPlay()
 {
     Super::BeginPlay();
 
     const UHLASettings* Settings = GetDefault<UHLASettings>();
+    CachedRtiAddress     = Settings->RTIAddress;
+    CachedFederationName = Settings->FederationName;
     UE_LOG(LogTemp, Log, TEXT("UnrealFederate: RTI address = '%s', federation = '%s'"),
-           *Settings->RTIAddress, *Settings->FederationName);
+           *CachedRtiAddress, *CachedFederationName);
 
-    // Bind handlers before the HLA thread can start firing events.
+    // Bind handlers before any HLA callback can fire.
     OnRadarRangeChanged.AddDynamic(this, &AUnrealFederateActor::HandleRadarRangeChanged);
     OnSimulationStarted.AddDynamic(this, &AUnrealFederateActor::HandleSimulationStarted);
     OnSimulationEnded.AddDynamic(this,   &AUnrealFederateActor::HandleSimulationEnded);
@@ -36,23 +56,126 @@ void AUnrealFederateActor::BeginPlay()
         GEngine->AddOnScreenDebugMessage(100, 99999.f, FColor::Yellow, TEXT("Waiting for simulation..."));
     }
 
-    // Pass a weak-captured lambda so the HLA thread can signal GameThread on connection loss.
-    TWeakObjectPtr<AUnrealFederateActor> WeakThis(this);
-    HLARunnable = new FHLAFederateRunnable(
-        &AircraftStateQueue, &RadarContactQueue,
-        Settings->RTIAddress, Settings->FederationName,
-        [WeakThis]()
-        {
-            if (WeakThis.IsValid())
-            {
-                WeakThis->OnSimulationEnded.Broadcast();
-            }
-        });
-    HLAThread = FRunnableThread::Create(HLARunnable, TEXT("HLAFederateThread"), 0, TPri_Normal);
+    ShouldStopFlag = MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false);
+    Ambassador     = MakeShared<FHLAAmbassador, ESPMode::ThreadSafe>(TWeakObjectPtr<AUnrealFederateActor>(this));
 
-    if (!HLAThread)
+    ConnectionState.store(EHLAConnectionState::Connecting);
+    RunConnectionAsync();
+}
+
+void AUnrealFederateActor::RunConnectionAsync()
+{
+    // Capture-by-value everything the worker will need. WeakThis lets the inner GameThread
+    // marshal-back fail safely if the actor is destroyed in the meantime. AmbassadorPtr and
+    // StopFlag are shared so the worker keeps them alive even past actor destruction.
+    TWeakObjectPtr<AUnrealFederateActor> WeakThis(this);
+    auto AmbassadorPtr = Ambassador;
+    auto StopFlag      = ShouldStopFlag;
+    std::wstring RtiUrlW(*CachedRtiAddress);
+    std::wstring FedNameW(*CachedFederationName);
+
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
+        [WeakThis, AmbassadorPtr, StopFlag,
+         RtiUrlW = std::move(RtiUrlW), FedNameW = std::move(FedNameW)]()
+        {
+            std::shared_ptr<rti1516e::RTIambassador> ResultRti;
+
+            for (int i = 0; i < kMaxConnectRetries; ++i)
+            {
+                if (StopFlag->load()) return;
+
+                if (i > 0)
+                {
+                    UE_LOG(LogTemp, Log, TEXT("UnrealFederate: waiting for federation... (%d/%d)"), i, kMaxConnectRetries);
+                    FPlatformProcess::Sleep(kConnectRetryIntervalS);
+                }
+
+                if (StopFlag->load()) return;
+
+                std::unique_ptr<rti1516e::RTIambassador> UniqueRti;
+                try
+                {
+                    rti1516e::RTIambassadorFactory Factory;
+                    UniqueRti = Factory.createRTIambassador();
+
+                    UniqueRti->connect(*AmbassadorPtr, rti1516e::HLA_EVOKED, RtiUrlW);
+                    UniqueRti->joinFederationExecution(kFederateType, FedNameW);
+
+                    AmbassadorPtr->CacheHandles(*UniqueRti);
+
+                    {
+                        rti1516e::ObjectClassHandle AircraftClass = UniqueRti->getObjectClassHandle(L"Aircraft");
+                        rti1516e::AttributeHandleSet Attribs;
+                        Attribs.insert(UniqueRti->getAttributeHandle(AircraftClass, L"Latitude"));
+                        Attribs.insert(UniqueRti->getAttributeHandle(AircraftClass, L"Longitude"));
+                        Attribs.insert(UniqueRti->getAttributeHandle(AircraftClass, L"Altitude"));
+                        UniqueRti->subscribeObjectClassAttributes(AircraftClass, Attribs);
+                    }
+
+                    {
+                        rti1516e::ObjectClassHandle RadarClass = UniqueRti->getObjectClassHandle(L"RadarContact");
+                        rti1516e::AttributeHandleSet Attribs;
+                        Attribs.insert(UniqueRti->getAttributeHandle(RadarClass, L"Distance"));
+                        Attribs.insert(UniqueRti->getAttributeHandle(RadarClass, L"Bearing"));
+                        Attribs.insert(UniqueRti->getAttributeHandle(RadarClass, L"IsInRange"));
+                        UniqueRti->subscribeObjectClassAttributes(RadarClass, Attribs);
+                    }
+
+                    UE_LOG(LogTemp, Log, TEXT("UnrealFederate: joined '%s' at %s"),
+                           *FString(FedNameW.c_str()), *FString(RtiUrlW.c_str()));
+
+                    // Promote unique → shared so we can hand ownership to the actor on the GameThread.
+                    ResultRti = std::shared_ptr<rti1516e::RTIambassador>(std::move(UniqueRti));
+                    break;
+                }
+                catch (...)
+                {
+                    // Match the prior FHLAFederateRunnable cleanup behaviour.
+                    if (UniqueRti)
+                    {
+                        try { UniqueRti->disconnect(); } catch (...) {}
+                        UniqueRti.reset();
+                    }
+                }
+            }
+
+            // Marshal the outcome back to the GameThread for state assignment + delegate broadcasts.
+            AsyncTask(ENamedThreads::GameThread, [WeakThis, ResultRti]()
+            {
+                AUnrealFederateActor* Actor = WeakThis.Get();
+                if (!Actor) return;
+
+                // EndPlay may have already flipped Stopped — don't resurrect a dead actor's state.
+                if (Actor->ConnectionState.load() == EHLAConnectionState::Stopped) return;
+
+                if (ResultRti)
+                {
+                    Actor->RtiAmbassador = ResultRti;
+                    Actor->ConnectionState.store(EHLAConnectionState::Connected);
+                }
+                else
+                {
+                    UE_LOG(LogTemp, Error, TEXT("UnrealFederate: could not join federation after %d retries. Check rtinode and aircraft_simulator are running."), kMaxConnectRetries);
+                    Actor->ConnectionState.store(EHLAConnectionState::Failed);
+                    Actor->OnSimulationEnded.Broadcast();
+                }
+            });
+        });
+}
+
+void AUnrealFederateActor::PumpHLACallbacks()
+{
+    try
     {
-        UE_LOG(LogTemp, Error, TEXT("UnrealFederate: failed to create HLA thread."));
+        // Non-blocking: returns immediately if no HLA events are pending.
+        // Any callbacks fire synchronously on this thread (GameThread).
+        RtiAmbassador->evokeCallback(0.0);
+    }
+    catch (...)
+    {
+        // Treat any exception out of evokeCallback as connection loss.
+        UE_LOG(LogTemp, Warning, TEXT("UnrealFederate: evokeCallback threw — federation ended"));
+        OnFederationLost();
     }
 }
 
@@ -60,24 +183,9 @@ void AUnrealFederateActor::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
-    // Drain new states into the interpolation buffer, keeping the last 3.
+    if (ConnectionState.load() == EHLAConnectionState::Connected && RtiAmbassador)
     {
-        FAircraftState State;
-        while (AircraftStateQueue.Dequeue(State))
-        {
-            PositionBuffer.Add(State);
-        }
-        if (PositionBuffer.Num() > 3)
-        {
-            PositionBuffer.RemoveAt(0, PositionBuffer.Num() - 3);
-        }
-    }
-
-    // Fire OnSimulationStarted once on the first received state.
-    if (!bHasReceivedData && PositionBuffer.Num() > 0)
-    {
-        bHasReceivedData = true;
-        OnSimulationStarted.Broadcast();
+        PumpHLACallbacks();
     }
 
     // Interpolate position at RenderTime = Now - InterpolationDelaySeconds.
@@ -123,21 +231,46 @@ void AUnrealFederateActor::Tick(float DeltaTime)
         GlobeAnchor->MoveToLongitudeLatitudeHeight(
             FVector(Out.Longitude, Out.Latitude, Out.Altitude * 0.3048));
     }
+}
 
-    // Drain the radar queue, keeping only the latest contact.
-    FRadarContact Contact;
-    bool bHadRadarUpdate = false;
-    while (RadarContactQueue.Dequeue(Contact))
+void AUnrealFederateActor::OnAircraftStateReceived(const FAircraftState& State)
+{
+    PositionBuffer.Add(State);
+    if (PositionBuffer.Num() > 3)
     {
-        bHadRadarUpdate = true;
+        PositionBuffer.RemoveAt(0, PositionBuffer.Num() - 3);
     }
 
-    // Only broadcast when the state actually transitions — avoids SetMaterial every frame.
-    if (bHadRadarUpdate && Contact.IsInRange != bIsInRange)
+    if (!bHasReceivedData)
+    {
+        bHasReceivedData = true;
+        OnSimulationStarted.Broadcast();
+    }
+}
+
+void AUnrealFederateActor::OnRadarContactReceived(const FRadarContact& Contact)
+{
+    // Only broadcast when the state actually transitions — avoids redundant SetMaterial calls.
+    if (Contact.IsInRange != bIsInRange)
     {
         bIsInRange = Contact.IsInRange;
         OnRadarRangeChanged.Broadcast(bIsInRange);
     }
+}
+
+void AUnrealFederateActor::OnFederationLost()
+{
+    // Idempotent: removeObjectInstance + connectionLost can both fire during teardown.
+    if (ConnectionState.load() == EHLAConnectionState::Stopped)
+    {
+        return;
+    }
+    ConnectionState.store(EHLAConnectionState::Stopped);
+    OnSimulationEnded.Broadcast();
+    // Do NOT call resign/disconnect on RtiAmbassador — same crash workaround as the prior
+    // FHLAFederateRunnable::Stop(): if WSL2 already died, OpenRTI holds a dangling federation
+    // pointer and any cleanup call causes an access violation inside OpenRTI itself.
+    // The RtiAmbassador shared_ptr is released in EndPlay; OpenRTI's destructor handles teardown.
 }
 
 void AUnrealFederateActor::HandleRadarRangeChanged(bool bInRange)
@@ -181,18 +314,19 @@ void AUnrealFederateActor::HandleSimulationEnded()
 
 void AUnrealFederateActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-    if (HLAThread)
+    // Signal the connect AsyncTask to abort its retry loop on the next sleep boundary.
+    if (ShouldStopFlag.IsValid())
     {
-        HLARunnable->Stop();        // signal the pump loop to exit
-        HLAThread->Kill(true);      // wait for the thread to finish (blocks up to ~0.1s)
-        delete HLAThread;
-        HLAThread = nullptr;
+        ShouldStopFlag->store(true);
     }
+    ConnectionState.store(EHLAConnectionState::Stopped);
 
-    delete HLARunnable;
-    HLARunnable = nullptr;
+    // Drop our local references. If the connect worker is still mid-connect(), it holds
+    // its own shared_ptr copies and the resources stay alive until the lambda exits.
+    // No resign/disconnect call — see OnFederationLost for the rationale.
+    RtiAmbassador.reset();
+    Ambassador.Reset();
 
-    // Remove after the HLA thread is fully stopped — no Broadcast can fire past this point.
     OnRadarRangeChanged.RemoveDynamic(this, &AUnrealFederateActor::HandleRadarRangeChanged);
     OnSimulationStarted.RemoveDynamic(this, &AUnrealFederateActor::HandleSimulationStarted);
     OnSimulationEnded.RemoveDynamic(this,   &AUnrealFederateActor::HandleSimulationEnded);

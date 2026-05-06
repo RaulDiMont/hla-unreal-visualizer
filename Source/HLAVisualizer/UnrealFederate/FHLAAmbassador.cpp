@@ -1,18 +1,14 @@
 #include "FHLAAmbassador.h"
-#include "FHLAFederateRunnable.h"
+#include "AUnrealFederateActor.h"
 #include "HAL/PlatformTime.h"
+#include "Async/Async.h"
 
 THIRD_PARTY_INCLUDES_START
 #include <RTI/encoding/BasicDataElements.h>
 THIRD_PARTY_INCLUDES_END
 
-FHLAAmbassador::FHLAAmbassador(
-    TQueue<FAircraftState, EQueueMode::Spsc>* InAircraftQueue,
-    TQueue<FRadarContact,  EQueueMode::Spsc>* InRadarQueue,
-    FHLAFederateRunnable*                     InOwner)
-    : AircraftQueue(InAircraftQueue)
-    , RadarQueue(InRadarQueue)
-    , Owner(InOwner)
+FHLAAmbassador::FHLAAmbassador(TWeakObjectPtr<AUnrealFederateActor> InOwner)
+    : Owner(InOwner)
 {
 }
 
@@ -37,13 +33,27 @@ void FHLAAmbassador::CacheHandles(rti1516e::RTIambassador& Rta)
 void FHLAAmbassador::connectionLost(std::wstring const& faultDescription)
     RTI_THROW((rti1516e::FederateInternalError))
 {
-    // Called by OpenRTI from within evokeCallback when the rtinode connection drops.
-    // We are already on the HLA thread — safe to write to the atomic flags directly.
-    // Do NOT call resignFederationExecution here: the RTI is already tearing down and
-    // a resign call would cause an access violation inside OpenRTI.
     UE_LOG(LogTemp, Warning, TEXT("UnrealFederate: connectionLost — %s"),
            *FString(faultDescription.c_str()));
-    Owner->SignalConnectionLost();
+
+    TWeakObjectPtr<AUnrealFederateActor> WeakOwner = Owner;
+    if (IsInGameThread())
+    {
+        if (auto* Actor = WeakOwner.Get())
+        {
+            Actor->OnFederationLost();
+        }
+    }
+    else
+    {
+        AsyncTask(ENamedThreads::GameThread, [WeakOwner]()
+        {
+            if (auto* Actor = WeakOwner.Get())
+            {
+                Actor->OnFederationLost();
+            }
+        });
+    }
 }
 
 void FHLAAmbassador::discoverObjectInstance(
@@ -62,13 +72,38 @@ void FHLAAmbassador::removeObjectInstance(
     rti1516e::SupplementalRemoveInfo    theRemoveInfo)
     RTI_THROW((rti1516e::FederateInternalError))
 {
-    std::map<rti1516e::ObjectInstanceHandle, rti1516e::ObjectClassHandle>::iterator It = InstanceClassMap.find(theObject);
-    if (It != InstanceClassMap.end() && It->second == AircraftClass)
+    auto It = InstanceClassMap.find(theObject);
+    const bool bWasAircraft = (It != InstanceClassMap.end() && It->second == AircraftClass);
+    if (It != InstanceClassMap.end())
     {
-        UE_LOG(LogTemp, Log, TEXT("UnrealFederate: Aircraft object removed — simulation ended."));
-        Owner->SignalConnectionLost();
+        InstanceClassMap.erase(It);
     }
-    InstanceClassMap.erase(theObject);
+
+    if (!bWasAircraft)
+    {
+        return;
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("UnrealFederate: Aircraft object removed — simulation ended."));
+
+    TWeakObjectPtr<AUnrealFederateActor> WeakOwner = Owner;
+    if (IsInGameThread())
+    {
+        if (auto* Actor = WeakOwner.Get())
+        {
+            Actor->OnFederationLost();
+        }
+    }
+    else
+    {
+        AsyncTask(ENamedThreads::GameThread, [WeakOwner]()
+        {
+            if (auto* Actor = WeakOwner.Get())
+            {
+                Actor->OnFederationLost();
+            }
+        });
+    }
 }
 
 void FHLAAmbassador::reflectAttributeValues(
@@ -80,7 +115,7 @@ void FHLAAmbassador::reflectAttributeValues(
     rti1516e::SupplementalReflectInfo        theReflectInfo)
     RTI_THROW((rti1516e::FederateInternalError))
 {
-    std::map<rti1516e::ObjectInstanceHandle, rti1516e::ObjectClassHandle>::iterator It = InstanceClassMap.find(theObject);
+    auto It = InstanceClassMap.find(theObject);
     if (It == InstanceClassMap.end())
     {
         return;
@@ -93,13 +128,15 @@ void FHLAAmbassador::reflectAttributeValues(
     // which is the IEEE 1516-2010 standard network encoding.
     auto DecodeFloat64 = [&](rti1516e::AttributeHandle Handle, double& Out) -> bool
     {
-        rti1516e::AttributeHandleValueMap::const_iterator It = theAttributeValues.find(Handle);
-        if (It == theAttributeValues.end()) return false;
+        rti1516e::AttributeHandleValueMap::const_iterator AttrIt = theAttributeValues.find(Handle);
+        if (AttrIt == theAttributeValues.end()) return false;
         rti1516e::HLAfloat64BE decoder;
-        decoder.decode(It->second);
+        decoder.decode(AttrIt->second);
         Out = decoder.get();
         return true;
     };
+
+    TWeakObjectPtr<AUnrealFederateActor> WeakOwner = Owner;
 
     if (ObjectClass == AircraftClass)
     {
@@ -110,7 +147,24 @@ void FHLAAmbassador::reflectAttributeValues(
         State.Timestamp = FPlatformTime::Seconds();
         UE_LOG(LogTemp, Log, TEXT("[Aircraft] Lat=%.6f  Lon=%.6f  Alt=%.1f ft"),
             State.Latitude, State.Longitude, State.Altitude);
-        AircraftQueue->Enqueue(State);
+
+        if (IsInGameThread())
+        {
+            if (auto* Actor = WeakOwner.Get())
+            {
+                Actor->OnAircraftStateReceived(State);
+            }
+        }
+        else
+        {
+            AsyncTask(ENamedThreads::GameThread, [WeakOwner, State]()
+            {
+                if (auto* Actor = WeakOwner.Get())
+                {
+                    Actor->OnAircraftStateReceived(State);
+                }
+            });
+        }
     }
     else if (ObjectClass == RadarContactClass)
     {
@@ -127,6 +181,23 @@ void FHLAAmbassador::reflectAttributeValues(
         }
         UE_LOG(LogTemp, Log, TEXT("[Radar] Distance=%.2f km  Bearing=%.1f°  InRange=%s"),
             Contact.Distance, Contact.Bearing, Contact.IsInRange ? TEXT("true") : TEXT("false"));
-        RadarQueue->Enqueue(Contact);
+
+        if (IsInGameThread())
+        {
+            if (auto* Actor = WeakOwner.Get())
+            {
+                Actor->OnRadarContactReceived(Contact);
+            }
+        }
+        else
+        {
+            AsyncTask(ENamedThreads::GameThread, [WeakOwner, Contact]()
+            {
+                if (auto* Actor = WeakOwner.Get())
+                {
+                    Actor->OnRadarContactReceived(Contact);
+                }
+            });
+        }
     }
 }

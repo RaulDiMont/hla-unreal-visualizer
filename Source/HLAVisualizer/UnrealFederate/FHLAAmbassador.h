@@ -1,7 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Containers/Queue.h"
+#include "UObject/WeakObjectPtr.h"
 
 THIRD_PARTY_INCLUDES_START
 #include <RTI/NullFederateAmbassador.h>
@@ -13,32 +13,31 @@ THIRD_PARTY_INCLUDES_END
 #include "Types/FAircraftState.h"
 #include "Types/FRadarContact.h"
 
+class AUnrealFederateActor;
+
 // Handles HLA protocol callbacks for the UnrealFederate.
 //
-// Inherits NullFederateAmbassador so only the two callbacks we care about need
+// Inherits NullFederateAmbassador so only the four callbacks we care about need
 // to be implemented — the ~20 other virtual methods stay as no-ops.
 //
-// Threading: callbacks arrive on the FHLAFederateRunnable thread (the same thread
-// that calls evokeCallback). This class itself has no thread state.
-class FHLAFederateRunnable;
-
+// Threading: callbacks fire on whichever thread invokes evokeCallback. Today that
+// is the GameThread (AUnrealFederateActor::Tick). The dispatch to the owning actor
+// is guarded by IsInGameThread() so any background-thread callback OpenRTI might
+// raise during connect()/join() (uncommon but theoretically possible) is correctly
+// marshaled back to the GameThread before touching UObject state.
 class FHLAAmbassador : public rti1516e::NullFederateAmbassador
 {
 public:
-    FHLAAmbassador(
-        TQueue<FAircraftState, EQueueMode::Spsc>* InAircraftQueue,
-        TQueue<FRadarContact,  EQueueMode::Spsc>* InRadarQueue,
-        FHLAFederateRunnable*                     InOwner);
+    explicit FHLAAmbassador(TWeakObjectPtr<AUnrealFederateActor> InOwner);
 
     virtual ~FHLAAmbassador() RTI_NOEXCEPT override;
 
-    // Called by FHLAFederateRunnable after joining the federation.
+    // Called by the connect AsyncTask after joinFederationExecution succeeds.
     // Fetches and caches all object class and attribute handles needed for decoding.
     void CacheHandles(rti1516e::RTIambassador& Rta);
 
     // 4.8 — called by the RTI when the connection to rtinode is lost unexpectedly
     // (e.g. WSL2 simulation exits before Unreal stops Play).
-    // Signals the FHLAFederateRunnable pump to exit cleanly before OpenRTI tears down.
     virtual void connectionLost(std::wstring const& faultDescription)
         RTI_THROW((rti1516e::FederateInternalError)) override;
 
@@ -70,9 +69,7 @@ public:
         RTI_THROW((rti1516e::FederateInternalError)) override;
 
 private:
-    TQueue<FAircraftState, EQueueMode::Spsc>* AircraftQueue;
-    TQueue<FRadarContact,  EQueueMode::Spsc>* RadarQueue;
-    FHLAFederateRunnable*                     Owner;
+    TWeakObjectPtr<AUnrealFederateActor> Owner;
 
     // Cached object class handles
     rti1516e::ObjectClassHandle AircraftClass;
